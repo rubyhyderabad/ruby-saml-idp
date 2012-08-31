@@ -1,6 +1,7 @@
 # encoding: utf-8
 module SamlIdp
   module Controller
+
     require 'openssl'
     require 'base64'
     require 'time'
@@ -43,6 +44,10 @@ module SamlIdp
       algorithm.to_s.split('::').last.downcase
     end
 
+    def saml_acs_url
+      @saml_acs_url ||= params[:saml_acs_url]
+    end
+
     protected
 
       def validate_saml_request(saml_request = params[:SAMLRequest])
@@ -59,25 +64,15 @@ module SamlIdp
       end
 
       def encode_SAMLResponse(nameID, opts = {})
-        now = Time.now.utc
-        response_id, reference_id = UUID.generate, UUID.generate
-        audience_uri = opts[:audience_uri] || saml_acs_url[/^(.*?\/\/.*?\/)/, 1]
-        issuer_uri = opts[:issuer_uri] || (defined?(request) && request.url) || "http://example.com"
-
-        assertion = %[<Assertion xmlns="urn:oasis:names:tc:SAML:2.0:assertion" ID="_#{reference_id}" IssueInstant="#{now.iso8601}" Version="2.0"><Issuer>#{issuer_uri}</Issuer><Subject><NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">#{nameID}</NameID><SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer"><SubjectConfirmationData InResponseTo="#{@saml_request_id}" NotOnOrAfter="#{(now+3*60).iso8601}" Recipient="#{@saml_acs_url}"></SubjectConfirmationData></SubjectConfirmation></Subject><Conditions NotBefore="#{(now-5).iso8601}" NotOnOrAfter="#{(now+60*60).iso8601}"><AudienceRestriction><Audience>#{audience_uri}</Audience></AudienceRestriction></Conditions><AttributeStatement><Attribute Name="http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress"><AttributeValue>#{nameID}</AttributeValue></Attribute></AttributeStatement><AuthnStatement AuthnInstant="#{now.iso8601}" SessionIndex="_#{reference_id}"><AuthnContext><AuthnContextClassRef>urn:federation:authentication:windows</AuthnContextClassRef></AuthnContext></AuthnStatement></Assertion>]
-
+        response_id, assertion_id = UUID.generate, UUID.generate
+        issuer_uri = opts[:issuer_uri] || default_issuer
+        assertion = build_assertion(nameID, assertion_id, opts)
         digest_value = Base64.encode64(algorithm.digest(assertion)).gsub(/\n/, '')
-
-        signed_info = %[<ds:SignedInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"></ds:CanonicalizationMethod><ds:SignatureMethod Algorithm="http://www.w3.org/2000/09/xmldsig#rsa-#{algorithm_name}"></ds:SignatureMethod><ds:Reference URI="#_#{reference_id}"><ds:Transforms><ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"></ds:Transform><ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"></ds:Transform></ds:Transforms><ds:DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig##{algorithm_name}"></ds:DigestMethod><ds:DigestValue>#{digest_value}</ds:DigestValue></ds:Reference></ds:SignedInfo>]
-
+        signed_info = build_signed_info(assertion_id, digest_value)
         signature_value = sign(signed_info).gsub(/\n/, '')
-
-        signature = %[<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">#{signed_info}<ds:SignatureValue>#{signature_value}</ds:SignatureValue><KeyInfo xmlns="http://www.w3.org/2000/09/xmldsig#"><ds:X509Data><ds:X509Certificate>#{self.x509_certificate}</ds:X509Certificate></ds:X509Data></KeyInfo></ds:Signature>]
-
-        assertion_and_signature = assertion.sub(/Issuer\>\<Subject/, "Issuer>#{signature}<Subject")
-
-        xml = %[<samlp:Response ID="_#{response_id}" Version="2.0" IssueInstant="#{now.iso8601}" Destination="#{@saml_acs_url}" Consent="urn:oasis:names:tc:SAML:2.0:consent:unspecified" InResponseTo="#{@saml_request_id}" xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"><Issuer xmlns="urn:oasis:names:tc:SAML:2.0:assertion">#{issuer_uri}</Issuer><samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success" /></samlp:Status>#{assertion_and_signature}</samlp:Response>]
-
+        signature = build_signature(signed_info, signature_value)
+        assertion_and_signature = insert_signature(assertion, signature)
+        xml = build_response(response_id, issuer_uri, assertion_and_signature)
         Base64.encode64(xml)
       end
 
@@ -86,6 +81,67 @@ module SamlIdp
       def sign(data)
         key = OpenSSL::PKey::RSA.new(self.secret_key)
         Base64.encode64(key.sign(algorithm.new, data))
+      end
+
+      def build_response(response_id, issuer_uri, assertion_and_signature)
+        now = Time.now.utc
+
+        # Include an InResponseTo attribute if there is a request ID.
+        if @saml_request_id
+          %[<samlp:Response ID="_#{response_id}" Version="2.0" IssueInstant="#{now.iso8601}" Destination="#{saml_acs_url}" Consent="urn:oasis:names:tc:SAML:2.0:consent:unspecified" InResponseTo="#{@saml_request_id}" xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"><Issuer xmlns="urn:oasis:names:tc:SAML:2.0:assertion">#{issuer_uri}</Issuer><samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success" /></samlp:Status>#{assertion_and_signature}</samlp:Response>]
+        else
+          %[<samlp:Response ID="_#{response_id}" Version="2.0" IssueInstant="#{now.iso8601}" Destination="#{saml_acs_url}" Consent="urn:oasis:names:tc:SAML:2.0:consent:unspecified" xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"><Issuer xmlns="urn:oasis:names:tc:SAML:2.0:assertion">#{issuer_uri}</Issuer><samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success" /></samlp:Status>#{assertion_and_signature}</samlp:Response>]
+        end
+      end
+
+      def build_assertion(name_id, assertion_id, opts = {})
+        now = Time.now.utc
+
+        issuer_uri = opts[:issuer_uri] || default_issuer
+        audience_uri = opts[:audience_uri] || default_audience
+        authn_context_class_ref = opts[:authn_context_class_ref] || SamlIdp::Default::AUTHN_CONTEXT_CLASS_REF
+
+        attributes = opts[:attributes] ? opts[:attributes].map { |name, value|
+          %[<Attribute Name="#{name}"><AttributeValue xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="xs:string">#{value}</AttributeValue></Attribute>]
+        }.join : ""
+
+        %[<Assertion xmlns="urn:oasis:names:tc:SAML:2.0:assertion" ID="_#{assertion_id}" IssueInstant="#{now.iso8601}" Version="2.0"><Issuer>#{issuer_uri}</Issuer>#{build_subject(name_id, opts)}<Conditions NotBefore="#{(now-5).iso8601}" NotOnOrAfter="#{(now+60*60).iso8601}"><AudienceRestriction><Audience>#{audience_uri}</Audience></AudienceRestriction></Conditions><AttributeStatement>#{attributes}</AttributeStatement><AuthnStatement AuthnInstant="#{now.iso8601}" SessionIndex="_#{assertion_id}"><AuthnContext><AuthnContextClassRef>#{authn_context_class_ref}</AuthnContextClassRef></AuthnContext></AuthnStatement></Assertion>]
+      end
+
+      def build_subject(name_id, opts = {})
+        name_id_format = opts[:name_id_format] || SamlIdp::Default::NAME_ID_FORMAT
+
+        %[<Subject><NameID Format="#{name_id_format}">#{name_id}</NameID><SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">#{build_subject_confirmation_data}</SubjectConfirmation></Subject>]
+      end
+
+      def build_subject_confirmation_data
+        now = Time.now.utc
+        if @saml_request_id
+          # Include an InResponseTo attribute if there is a request ID.
+          %[<SubjectConfirmationData InResponseTo="#{@saml_request_id}" NotOnOrAfter="#{(now+3*60).iso8601}" Recipient="#{saml_acs_url}"></SubjectConfirmationData>]
+        else
+          %[<SubjectConfirmationData NotOnOrAfter="#{(now+3*60).iso8601}" Recipient="#{saml_acs_url}"></SubjectConfirmationData>]
+        end
+      end
+
+      def build_signed_info(assertion_id, digest_value)
+        %[<ds:SignedInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"></ds:CanonicalizationMethod><ds:SignatureMethod Algorithm="http://www.w3.org/2000/09/xmldsig#rsa-#{algorithm_name}"></ds:SignatureMethod><ds:Reference URI="#_#{assertion_id}"><ds:Transforms><ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"></ds:Transform><ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"></ds:Transform></ds:Transforms><ds:DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig##{algorithm_name}"></ds:DigestMethod><ds:DigestValue>#{digest_value}</ds:DigestValue></ds:Reference></ds:SignedInfo>]
+      end
+
+      def build_signature(signed_info, signature_value)
+        %[<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">#{signed_info}<ds:SignatureValue>#{signature_value}</ds:SignatureValue><KeyInfo xmlns="http://www.w3.org/2000/09/xmldsig#"><ds:X509Data><ds:X509Certificate>#{self.x509_certificate}</ds:X509Certificate></ds:X509Data></KeyInfo></ds:Signature>]
+      end
+
+      def insert_signature(assertion, signature)
+        assertion.sub(/Issuer\>\<Subject/, "Issuer>#{signature}<Subject")
+      end
+
+      def default_issuer
+        (defined?(request) && request.url) || "http://example.com"
+      end
+
+      def default_audience
+        (defined?(saml_acs_url) && (saml_acs_url[/^(.*?\/\/.*?\/)/, 1])) || "http://example.audience.com"
       end
 
   end
