@@ -141,7 +141,7 @@ module SamlIdp
       end
 
       def default_audience
-        (defined?(saml_acs_url) && (saml_acs_url[/^(.*?\/\/.*?\/)/, 1])) || "http://example.audience.com"
+        (saml_acs_url && (saml_acs_url[/^(.*?\/\/.*?\/)/, 1])) || "http://example.audience.com"
       end
 
   end
