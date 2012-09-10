@@ -65,6 +65,7 @@ module SamlIdp
 
       def encode_SAMLResponse(nameID, opts = {})
         response_id, assertion_id = UUID.generate, UUID.generate
+        @saml_acs_url ||= opts[:saml_acs_url]
         issuer_uri = opts[:issuer_uri] || default_issuer
         assertion = build_assertion(nameID, assertion_id, opts)
         digest_value = Base64.encode64(algorithm.digest(assertion)).gsub(/\n/, '')
@@ -101,11 +102,11 @@ module SamlIdp
         audience_uri = opts[:audience_uri] || default_audience
         authn_context_class_ref = opts[:authn_context_class_ref] || SamlIdp::Default::AUTHN_CONTEXT_CLASS_REF
 
-        attributes = opts[:attributes] ? opts[:attributes].map { |name, value|
+        saml_attributes = opts[:saml_attributes] ? opts[:saml_attributes].map { |name, value|
           %[<Attribute Name="#{name}"><AttributeValue xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="xs:string">#{value}</AttributeValue></Attribute>]
         }.join : ""
 
-        %[<Assertion xmlns="urn:oasis:names:tc:SAML:2.0:assertion" ID="_#{assertion_id}" IssueInstant="#{now.iso8601}" Version="2.0"><Issuer>#{issuer_uri}</Issuer>#{build_subject(name_id, opts)}<Conditions NotBefore="#{(now-5).iso8601}" NotOnOrAfter="#{(now+60*60).iso8601}"><AudienceRestriction><Audience>#{audience_uri}</Audience></AudienceRestriction></Conditions><AttributeStatement>#{attributes}</AttributeStatement><AuthnStatement AuthnInstant="#{now.iso8601}" SessionIndex="_#{assertion_id}"><AuthnContext><AuthnContextClassRef>#{authn_context_class_ref}</AuthnContextClassRef></AuthnContext></AuthnStatement></Assertion>]
+        %[<Assertion xmlns="urn:oasis:names:tc:SAML:2.0:assertion" ID="_#{assertion_id}" IssueInstant="#{now.iso8601}" Version="2.0"><Issuer>#{issuer_uri}</Issuer>#{build_subject(name_id, opts)}<Conditions NotBefore="#{(now-5).iso8601}" NotOnOrAfter="#{(now+60*60).iso8601}"><AudienceRestriction><Audience>#{audience_uri}</Audience></AudienceRestriction></Conditions><AttributeStatement>#{saml_attributes}</AttributeStatement><AuthnStatement AuthnInstant="#{now.iso8601}" SessionIndex="_#{assertion_id}"><AuthnContext><AuthnContextClassRef>#{authn_context_class_ref}</AuthnContextClassRef></AuthnContext></AuthnStatement></Assertion>]
       end
 
       def build_subject(name_id, opts = {})
